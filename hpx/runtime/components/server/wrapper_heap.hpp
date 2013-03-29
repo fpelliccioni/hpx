@@ -100,6 +100,7 @@ namespace hpx { namespace components { namespace detail
         )
           : pool_(NULL), first_free_(NULL), step_(step), size_(0), free_size_(0),
             base_gid_(naming::invalid_gid),
+            assign_base_gid_(false),
             class_name_(class_name),
 #if defined(HPX_DEBUG)
             alloc_count_(0), free_count_(0), heap_count_(count),
@@ -125,6 +126,7 @@ namespace hpx { namespace components { namespace detail
           : pool_(NULL), first_free_(NULL),
             step_(heap_step), size_(0), free_size_(0),
             base_gid_(naming::invalid_gid),
+            assign_base_gid_(false),
 #if defined(HPX_DEBUG)
             alloc_count_(0), free_count_(0), heap_count_(0),
 #endif
@@ -229,7 +231,7 @@ namespace hpx { namespace components { namespace detail
             free_size_ += count;
 
             // release the pool if this one was the last allocated item
-            test_release();
+            test_release(l);
         }
         bool did_alloc (void *p) const
         {
@@ -251,29 +253,51 @@ namespace hpx { namespace components { namespace detail
             BOOST_ASSERT(did_alloc(p));
 
             value_type* addr = static_cast<value_type*>(pool_->address());
-            if (!base_gid_) {
-                scoped_lock l(mtx_);
+            naming::gid_type base_gid;
+            {
+                scoped_lock lk(mtx_);
+                base_gid = base_gid_;
+            }
 
-                // store a pointer to the AGAS client
-                hpx::applier::applier& appl = hpx::applier::get_applier();
-
-                // this is the first call to get_gid() for this heap - allocate
-                // a sufficiently large range of global ids
-                base_gid_ = ids.get_id(appl.here(), appl.get_agas_client(), step_);
-
-                // register the global ids and the base address of this heap
-                // with the AGAS
-                if (!applier::bind_range(base_gid_, step_,
-                      naming::address(appl.here(),
-                          components::get_component_type<typename value_type::type_holder>(),
-                          addr),
-                      sizeof(value_type)))
+            if (!base_gid) {
+                if(assign_base_gid_)
                 {
-                    return naming::invalid_gid;
+                    while(assign_base_gid_)
+                        ;
+                }
+                else
+                {
+                    assign_base_gid_ = true;
+                    // store a pointer to the AGAS client
+                    hpx::applier::applier& appl = hpx::applier::get_applier();
+                    // this is the first call to get_gid() for this heap - allocate
+                    // a sufficiently large range of global ids
+                    base_gid = ids.get_id(appl.here(), appl.get_agas_client(), step_);
+
+                    // register the global ids and the base address of this heap
+                    // with the AGAS
+                    if (!applier::bind_range(base_gid, step_,
+                          naming::address(appl.here(),
+                              components::get_component_type<typename value_type::type_holder>(),
+                              addr),
+                          sizeof(value_type)))
+                    {
+                        return naming::invalid_gid;
+                    }
+
+                    {
+                        scoped_lock lk(mtx_);
+                        BOOST_ASSERT(!base_gid_);
+                        base_gid_ = base_gid;
+                    }
+                    assign_base_gid_ = false;
                 }
             }
 
-            return base_gid_ + static_cast<boost::uint64_t>((static_cast<value_type*>(p) - addr));
+            {
+                scoped_lock lk(mtx_);
+                return base_gid_ + static_cast<boost::uint64_t>((static_cast<value_type*>(p) - addr));
+            }
         }
 
         void set_gid(naming::gid_type const& g)
@@ -295,7 +319,7 @@ namespace hpx { namespace components { namespace detail
         }
 
     protected:
-        bool test_release()
+        bool test_release(scoped_lock & lk)
         {
             if (pool_ == NULL || free_size_ < size_ || first_free_ < pool_+size_)
                 return false;
@@ -303,8 +327,12 @@ namespace hpx { namespace components { namespace detail
 
             // unbind in AGAS service
             if (base_gid_) {
-                applier::unbind_range(base_gid_, step_);
+                naming::gid_type base_gid = base_gid_;
                 base_gid_ = naming::invalid_gid;
+                {
+                    hpx::util::unlock_the_lock<scoped_lock> ul(lk);
+                    applier::unbind_range(base_gid, step_);
+                }
             }
 
             tidy();
@@ -386,6 +414,7 @@ namespace hpx { namespace components { namespace detail
         naming::gid_type base_gid_;
 
         mutable mutex_type mtx_;
+        mutable boost::atomic<bool> assign_base_gid_;
 
     public:
         std::string const class_name_;

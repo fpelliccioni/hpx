@@ -87,6 +87,7 @@ namespace hpx { namespace util
             uoms_.reserve(names.size());
             BOOST_FOREACH(std::string const& name, names)
             {
+                hpx::util::unlock_the_lock<mutex_type::scoped_lock> ul(l);
                 performance_counters::discover_counter_type(name, func,
                     performance_counters::discover_counters_full);
             }

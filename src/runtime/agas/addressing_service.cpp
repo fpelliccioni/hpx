@@ -326,7 +326,10 @@ bool addressing_service::get_console_locality(
         if (is_bootstrap())
             rep = bootstrap->symbol_ns_server.service(req, ec);
         else
+        {
+            hpx::util::unlock_the_lock<mutex_type::scoped_lock> ul(lock);
             rep = hosted->symbol_ns_.service(req, action_priority_, ec);
+        }
 
         if (!ec && (rep.get_gid() != naming::invalid_gid) &&
             (rep.get_status() == success))
@@ -719,27 +722,34 @@ bool addressing_service::get_id_range(
             // futures are checked out and pending.
 
             // wait for the semaphore to become available
-            lock_semaphore lock(hosted->promise_pool_semaphore_);
-
             // get a future
             typedef checkout_promise<
                 promise_pool_type
               , future_type
             > checkout_promise_type;
 
-            checkout_promise_type cf(hosted->promise_pool_, f);
-            if (0 == f) {
-                HPX_THROWS_IF(ec, invalid_status,
-                    "addressing_service::get_id_range",
-                    "could not check out future object instance during bootstrap");
-                return false;
+            boost::scoped_ptr<checkout_promise_type> cf;
+
+            {
+                lock_semaphore lock(hosted->promise_pool_semaphore_);
+
+                cf.reset(new checkout_promise_type(hosted->promise_pool_, f));
+                if (0 == f) {
+                    HPX_THROWS_IF(ec, invalid_status,
+                        "addressing_service::get_id_range",
+                        "could not check out future object instance during bootstrap");
+                    return false;
+                }
+
+                // execute the action (synchronously)
+                f->apply(bootstrap_primary_namespace_id(), req);
             }
-
-            // execute the action (synchronously)
-            f->apply(bootstrap_primary_namespace_id(), req);
             rep = f->get_future().get(ec);
+            {
+                lock_semaphore lock(hosted->promise_pool_semaphore_);
 
-            cf.set_ok();
+                cf->set_ok();
+            }
         }
 
         error const s = rep.get_status();
@@ -803,27 +813,38 @@ bool addressing_service::bind_range(
             // futures are checked out and pending.
 
             // wait for the semaphore to become available
-            lock_semaphore lock(hosted->promise_pool_semaphore_);
-
-            // get a future
             typedef checkout_promise<
                 promise_pool_type
               , future_type
             > checkout_promise_type;
 
-            checkout_promise_type cf(hosted->promise_pool_, f);
-            if (0 == f) {
-                HPX_THROWS_IF(ec, invalid_status,
-                    "addressing_service::bind_range",
-                    "could not check out future object instance during bootstrap");
-                return false;
+            boost::scoped_ptr<checkout_promise_type> cf;
+
+            {
+                lock_semaphore lock(hosted->promise_pool_semaphore_);
+
+                // get a future
+                typedef checkout_promise<
+                    promise_pool_type
+                  , future_type
+                > checkout_promise_type;
+
+                cf.reset(new checkout_promise_type(hosted->promise_pool_, f));
+                if (0 == f) {
+                    HPX_THROWS_IF(ec, invalid_status,
+                        "addressing_service::bind_range",
+                        "could not check out future object instance during bootstrap");
+                    return false;
+                }
+
+                // execute the action (synchronously)
+                f->apply(bootstrap_primary_namespace_id(), req);
             }
-
-            // execute the action (synchronously)
-            f->apply(bootstrap_primary_namespace_id(), req);
             rep = f->get_future().get(ec);
-
-            cf.set_ok();
+            {
+                lock_semaphore lock(hosted->promise_pool_semaphore_);
+                cf->set_ok();
+            }
         }
 
         const error s = rep.get_status();
